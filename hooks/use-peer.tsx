@@ -69,15 +69,88 @@ export function PeerProvider({ children }: { children: ReactNode }) {
         });
         break;
       case 'fileContent':
-        const blob = new Blob([message.data]);
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = message.name;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        // Get MIME type based on file extension
+        const getMimeType = (filename: string): string => {
+          const ext = filename.split('.').pop()?.toLowerCase();
+          const mimeTypes: Record<string, string> = {
+            // Images
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'png': 'image/png',
+            'gif': 'image/gif',
+            'webp': 'image/webp',
+            'svg': 'image/svg+xml',
+            // Videos
+            'mp4': 'video/mp4',
+            'avi': 'video/x-msvideo',
+            'mov': 'video/quicktime',
+            'wmv': 'video/x-ms-wmv',
+            'flv': 'video/x-flv',
+            'webm': 'video/webm',
+            // Audio
+            'mp3': 'audio/mpeg',
+            'wav': 'audio/wav',
+            'flac': 'audio/flac',
+            'aac': 'audio/aac',
+            'ogg': 'audio/ogg',
+            // Documents
+            'pdf': 'application/pdf',
+            'doc': 'application/msword',
+            'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'txt': 'text/plain',
+            'rtf': 'application/rtf',
+            // Archives
+            'zip': 'application/zip',
+            'rar': 'application/x-rar-compressed',
+            '7z': 'application/x-7z-compressed',
+            'tar': 'application/x-tar',
+            'gz': 'application/gzip',
+            // Default
+            'json': 'application/json',
+            'xml': 'application/xml',
+            'html': 'text/html',
+            'css': 'text/css',
+            'js': 'application/javascript'
+          };
+          return mimeTypes[ext || ''] || 'application/octet-stream';
+        };
+
+        const mimeType = getMimeType(message.name);
+        const blob = new Blob([message.data], { type: mimeType });
+        
+        // Check if we're on mobile
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        
+        if (isMobile) {
+          // For mobile, try to open in a new tab first (better for viewing)
+          const url = URL.createObjectURL(blob);
+          const newWindow = window.open(url, '_blank');
+          
+          // If popup was blocked or failed, fall back to download
+          setTimeout(() => {
+            if (!newWindow || newWindow.closed) {
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = message.name;
+              a.style.display = 'none';
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+            }
+            URL.revokeObjectURL(url);
+          }, 1000);
+        } else {
+          // For desktop, use standard download
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = message.name;
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }
         break;
     }
   }, [sendMessage]);

@@ -4,7 +4,10 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef, ty
 import Peer, { DataConnection } from 'peerjs';
 import type { FileInfo, ProtocolMessage, ConnectionStatus, PeerState } from '@/lib/peer-types';
 
-const CHUNK_SIZE = 64 * 1024; // 64KB chunks for faster transfer
+// Detect mobile and adjust chunk size accordingly
+const isMobileDevice = () => /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+const CHUNK_SIZE = isMobileDevice() ? 32 * 1024 : 64 * 1024; // Smaller chunks for mobile
+const CHUNK_DELAY = isMobileDevice() ? 10 : 0; // Small delay between chunks on mobile
 
 interface PeerContextType extends PeerState {
   addFiles: (files: File[]) => void;
@@ -92,8 +95,8 @@ export function PeerProvider({ children }: { children: ReactNode }) {
                 if (!isLast) {
                   offset += CHUNK_SIZE;
                   chunkIndex++;
-                  // Use setTimeout to prevent blocking the UI
-                  setTimeout(sendNextChunk, 0);
+                  // Use setTimeout with mobile-specific delay to prevent blocking the UI
+                  setTimeout(sendNextChunk, CHUNK_DELAY);
                 }
               };
               
@@ -156,18 +159,71 @@ export function PeerProvider({ children }: { children: ReactNode }) {
             const mimeType = getMimeType(downloadInfo.name);
             const blob = new Blob([combinedArray], { type: mimeType });
             
-            // Immediate download without delay
+            // Mobile-optimized download handling
+            const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
             const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = downloadInfo.name;
-            a.style.display = 'none';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
             
-            // Clean up
-            setTimeout(() => URL.revokeObjectURL(url), 100);
+            if (isMobile) {
+              // For mobile, try multiple approaches for better compatibility
+              try {
+                // First try: Open in new tab (works better for images, PDFs, etc.)
+                const newWindow = window.open(url, '_blank');
+                
+                // Fallback: Direct download if popup blocked
+                setTimeout(() => {
+                  if (!newWindow || newWindow.closed || newWindow.location.href === 'about:blank') {
+                    // Create download link with user interaction
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = downloadInfo.name;
+                    a.style.display = 'none';
+                    a.target = '_blank';
+                    a.rel = 'noopener noreferrer';
+                    
+                    // Add to DOM and trigger click
+                    document.body.appendChild(a);
+                    
+                    // For iOS Safari, we need to trigger the click in a user gesture context
+                    const clickEvent = new MouseEvent('click', {
+                      view: window,
+                      bubbles: true,
+                      cancelable: true
+                    });
+                    a.dispatchEvent(clickEvent);
+                    
+                    // Clean up
+                    setTimeout(() => {
+                      document.body.removeChild(a);
+                    }, 100);
+                  }
+                  
+                  // Clean up URL after delay
+                  setTimeout(() => URL.revokeObjectURL(url), 2000);
+                }, 500);
+              } catch (error) {
+                console.error('Mobile download error:', error);
+                // Final fallback: standard download
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = downloadInfo.name;
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+              }
+            } else {
+              // Desktop: Standard download
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = downloadInfo.name;
+              a.style.display = 'none';
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              setTimeout(() => URL.revokeObjectURL(url), 100);
+            }
+            
             downloadingFilesRef.current.delete(message.fileId);
           }
         }
@@ -315,13 +371,25 @@ export function PeerProvider({ children }: { children: ReactNode }) {
     if (typeof window === 'undefined') return;
     
     console.log('Initializing PeerJS...');
+    
+    // Enhanced ICE servers for better mobile connectivity
+    const iceServers = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' }
+    ];
+    
     const peer = new Peer({
       debug: 2, // Enable debug logs
       config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
+        iceServers,
+        iceCandidatePoolSize: 10, // More ICE candidates for better connectivity
+        iceTransportPolicy: 'all', // Use both STUN and TURN
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require'
       }
     });
     peerRef.current = peer;

@@ -4,6 +4,8 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef, ty
 import Peer, { DataConnection } from 'peerjs';
 import type { FileInfo, ProtocolMessage, ConnectionStatus, PeerState } from '@/lib/peer-types';
 
+const CHUNK_SIZE = 64 * 1024; // 64KB chunks for faster transfer
+
 interface PeerContextType extends PeerState {
   addFiles: (files: File[]) => void;
   removeFile: (fileId: string) => void;
@@ -28,6 +30,7 @@ export function PeerProvider({ children }: { children: ReactNode }) {
   const peerRef = useRef<Peer | null>(null);
   const connectionRef = useRef<DataConnection | null>(null);
   const filesMapRef = useRef<Map<string, File>>(new Map());
+  const downloadingFilesRef = useRef<Map<string, { chunks: ArrayBuffer[]; name: string; size: number; receivedChunks: number; totalChunks: number }>>(new Map());
 
   const sendMessage = useCallback((message: ProtocolMessage) => {
     if (connectionRef.current && connectionRef.current.open) {
@@ -52,21 +55,122 @@ export function PeerProvider({ children }: { children: ReactNode }) {
         setRemoteFiles(prev => prev.filter(f => f.id !== message.fileId));
         break;
       case 'accept':
-        message.fileIds.forEach(fileId => {
+        message.fileIds.forEach(async (fileId) => {
           const file = filesMapRef.current.get(fileId);
           if (file) {
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            
+            // Send file start message
+            sendMessage({
+              type: 'fileStart',
+              fileId,
+              name: file.name,
+              size: file.size,
+              totalChunks
+            });
+
+            // Send file in chunks for better performance
             const reader = new FileReader();
-            reader.onload = () => {
-              sendMessage({
-                type: 'fileContent',
-                fileId,
-                name: file.name,
-                data: reader.result as ArrayBuffer
-              });
+            let offset = 0;
+            let chunkIndex = 0;
+
+            const sendNextChunk = () => {
+              const chunk = file.slice(offset, offset + CHUNK_SIZE);
+              const chunkReader = new FileReader();
+              
+              chunkReader.onload = () => {
+                const isLast = offset + CHUNK_SIZE >= file.size;
+                
+                sendMessage({
+                  type: 'fileChunk',
+                  fileId,
+                  chunkIndex,
+                  data: chunkReader.result as ArrayBuffer,
+                  isLast
+                });
+
+                if (!isLast) {
+                  offset += CHUNK_SIZE;
+                  chunkIndex++;
+                  // Use setTimeout to prevent blocking the UI
+                  setTimeout(sendNextChunk, 0);
+                }
+              };
+              
+              chunkReader.readAsArrayBuffer(chunk);
             };
-            reader.readAsArrayBuffer(file);
+
+            sendNextChunk();
           }
         });
+        break;
+      case 'fileStart':
+        // Initialize file download tracking
+        downloadingFilesRef.current.set(message.fileId, {
+          chunks: new Array(message.totalChunks),
+          name: message.name,
+          size: message.size,
+          receivedChunks: 0,
+          totalChunks: message.totalChunks
+        });
+        break;
+      case 'fileChunk':
+        const downloadInfo = downloadingFilesRef.current.get(message.fileId);
+        if (downloadInfo) {
+          // Store chunk in correct position
+          downloadInfo.chunks[message.chunkIndex] = message.data;
+          downloadInfo.receivedChunks++;
+          
+          // If this is the last chunk or we have all chunks, assemble and download
+          if (message.isLast || downloadInfo.receivedChunks === downloadInfo.totalChunks) {
+            // Combine all chunks
+            const totalSize = downloadInfo.chunks.reduce((size, chunk) => size + (chunk?.byteLength || 0), 0);
+            const combinedArray = new Uint8Array(totalSize);
+            let offset = 0;
+            
+            for (const chunk of downloadInfo.chunks) {
+              if (chunk) {
+                combinedArray.set(new Uint8Array(chunk), offset);
+                offset += chunk.byteLength;
+              }
+            }
+            
+            // Create and download file immediately
+            const getMimeType = (filename: string): string => {
+              const ext = filename.split('.').pop()?.toLowerCase();
+              const mimeTypes: Record<string, string> = {
+                'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'gif': 'image/gif',
+                'webp': 'image/webp', 'svg': 'image/svg+xml', 'mp4': 'video/mp4', 'avi': 'video/x-msvideo',
+                'mov': 'video/quicktime', 'wmv': 'video/x-ms-wmv', 'flv': 'video/x-flv', 'webm': 'video/webm',
+                'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'flac': 'audio/flac', 'aac': 'audio/aac',
+                'ogg': 'audio/ogg', 'pdf': 'application/pdf', 'doc': 'application/msword',
+                'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                'txt': 'text/plain', 'rtf': 'application/rtf', 'zip': 'application/zip',
+                'rar': 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
+                'tar': 'application/x-tar', 'gz': 'application/gzip', 'json': 'application/json',
+                'xml': 'application/xml', 'html': 'text/html', 'css': 'text/css', 'js': 'application/javascript'
+              };
+              return mimeTypes[ext || ''] || 'application/octet-stream';
+            };
+
+            const mimeType = getMimeType(downloadInfo.name);
+            const blob = new Blob([combinedArray], { type: mimeType });
+            
+            // Immediate download without delay
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = downloadInfo.name;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            
+            // Clean up
+            setTimeout(() => URL.revokeObjectURL(url), 100);
+            downloadingFilesRef.current.delete(message.fileId);
+          }
+        }
         break;
       case 'fileContent':
         // Get MIME type based on file extension
